@@ -1,0 +1,143 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "markdown-memory-vec"
+version = "0.1.0"
+description = "Lightweight vector search for Markdown-based memory systems. Chunk, embed, index, and hybrid-search your .md knowledge base with sqlite-vec."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Aigente", email = "dev@aigente.io" },
+]
+keywords = [
+    "vector-search",
+    "markdown",
+    "memory",
+    "embeddings",
+    "sqlite-vec",
+    "semantic-search",
+    "RAG",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
+    "Typing :: Typed",
+]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+vector = [
+    "sqlite-vec>=0.1.6",
+    "sentence-transformers>=3.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pyright>=1.1.380",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-PyYAML",
+]
+
+[project.urls]
+Homepage = "https://github.com/aigente/markdown-memory-vec"
+Repository = "https://github.com/aigente/markdown-memory-vec"
+
+[project.scripts]
+memory-vec = "memory_vec.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memory_vec"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+fix = true
+target-version = "py311"
+include = ["src/**", "tests/**"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "B",
+    "Q",
+    "I",
+    "ASYNC",
+    "T20",
+]
+ignore = [
+    "F401",
+    "E501",
+    "W293",
+    "W291",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["T201"]  # Allow print statements in test files
+
+# ---------------------------------------------------------------------------
+# Pyright
+# ---------------------------------------------------------------------------
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+reportUnnecessaryIsInstance = false
+reportMissingTypeStubs = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnusedImport = false
+
+# ---------------------------------------------------------------------------
+# Mypy
+# ---------------------------------------------------------------------------
+[tool.mypy]
+strict = true
+python_version = "3.11"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+warn_return_any = true
+show_error_codes = true
+warn_unused_ignores = false
+disallow_incomplete_defs = true
+disallow_untyped_decorators = true
+disallow_any_unimported = false
+cache_dir = ".mypy_cache"
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "6.0"
+testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# Poe the Poet (task runner)
+# ---------------------------------------------------------------------------
+[tool.poe.tasks]
+fmt = "ruff format"
+lint = "ruff check"
+pyright = "pyright"
+mypy = "mypy src tests"
+test = "pytest -v"
+check = ["fmt", "lint", "pyright", "test"]
