@@ -42,6 +42,12 @@ vector = [
     "sqlite-vec>=0.1.6",
     "sentence-transformers>=3.0",
 ]
+onnx = [
+    "sqlite-vec>=0.1.6",
+    "onnxruntime>=1.17.0",
+    "tokenizers>=0.19.0",
+    "numpy>=1.24.0",
+]
 dev = [
     "pytest>=7.0",
     "pyright>=1.1.380",

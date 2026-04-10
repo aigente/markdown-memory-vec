@@ -76,13 +76,17 @@ class MemoryVectorService:
 
     @property
     def is_available(self) -> bool:
-        """Check if all vector dependencies are installed."""
+        """Check if vector dependencies are installed.
+
+        Returns ``True`` if sqlite-vec is available AND at least one embedding
+        backend (ONNX or sentence-transformers) is available.
+        """
         if self._available is None:
             try:
-                from .embedder import is_sentence_transformers_available
+                from .embedder import is_any_backend_available
                 from .store import is_sqlite_vec_available
 
-                self._available = is_sqlite_vec_available() and is_sentence_transformers_available()
+                self._available = is_sqlite_vec_available() and is_any_backend_available()
             except ImportError:
                 self._available = False
         return self._available
@@ -107,7 +111,9 @@ class MemoryVectorService:
 
         if not self.is_available:
             logger.warning(
-                "Vector dependencies not available. " "Install with: pip install 'markdown-memory-vec[vector]'"
+                "Vector dependencies not available. Install with:\n"
+                "  pip install 'markdown-memory-vec[onnx]'   # lightweight\n"
+                "  pip install 'markdown-memory-vec[vector]'  # full"
             )
             return False
 
@@ -116,12 +122,12 @@ class MemoryVectorService:
             return False
 
         try:
-            from .embedder import SentenceTransformerEmbedder
+            from .embedder import create_embedder
             from .indexer import MemoryIndexer
             from .search import HybridSearchService
             from .store import SqliteVecStore
 
-            self._embedder = SentenceTransformerEmbedder(model_name=self._model_name)
+            self._embedder = create_embedder(model_name=self._model_name)
 
             # Dynamic dimension: ask the embedder for the actual output dimension
             dimension = self._embedder.dimension
@@ -323,4 +329,7 @@ class MemoryVectorService:
             self._store = None
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass

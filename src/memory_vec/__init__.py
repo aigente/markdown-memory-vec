@@ -6,29 +6,27 @@ This package provides:
 - **Interfaces** (``interfaces.py``): ``IEmbedder``, ``ISqliteVecStore``
 - **Storage** (``store.py``): ``SqliteVecStore`` — concrete sqlite-vec
   backed vector store implementing ``ISqliteVecStore``
-- **Embedder** (``embedder.py``): ``SentenceTransformerEmbedder`` — concrete
-  embedder using sentence-transformers, implementing ``IEmbedder``
+- **Embedder** (``embedder.py``): Dual-backend embedding with auto-detection:
+  - ``OnnxEmbedder`` — lightweight (~55 MB), uses onnxruntime + tokenizers
+  - ``SentenceTransformerEmbedder`` — full-featured (~1.5 GB), uses torch
+  - ``create_embedder()`` — factory that picks the best available backend
 - **Indexer** (``indexer.py``): ``MemoryIndexer`` — Markdown-to-vector indexing
   pipeline with chunking, SHA-256 dedup, and YAML frontmatter parsing
 - **Search** (``search.py``): ``HybridSearchService`` — hybrid retrieval
   combining semantic similarity, importance, and temporal decay
 
-All heavy dependencies (``sqlite-vec``, ``sentence-transformers``) are optional.
-Use the ``is_*_available()`` helpers to check at runtime.
+All heavy dependencies are optional:
+  - ``pip install 'markdown-memory-vec[onnx]'``   → onnxruntime + tokenizers (~55 MB)
+  - ``pip install 'markdown-memory-vec[vector]'``  → sentence-transformers + torch (~1.5 GB)
 
 Quick start::
 
-    from memory_vec import (
-        SqliteVecStore,
-        SentenceTransformerEmbedder,
-        MemoryIndexer,
-        HybridSearchService,
-    )
+    from memory_vec import create_embedder, SqliteVecStore, MemoryIndexer, HybridSearchService
 
     store = SqliteVecStore("memory.db")
     store.ensure_tables()
 
-    embedder = SentenceTransformerEmbedder()
+    embedder = create_embedder()  # auto-detects best backend
     indexer = MemoryIndexer(store, embedder)
     indexer.index_directory("path/to/markdown/files")
 
@@ -38,7 +36,15 @@ Quick start::
 
 # Interfaces
 # Concrete implementations
-from .embedder import SentenceTransformerEmbedder, is_sentence_transformers_available
+from .embedder import (
+    OnnxEmbedder,
+    SentenceTransformerEmbedder,
+    create_embedder,
+    download_onnx_model,
+    is_any_backend_available,
+    is_onnx_available,
+    is_sentence_transformers_available,
+)
 from .indexer import MemoryIndexer, chunk_text, parse_frontmatter
 from .interfaces import IEmbedder, ISqliteVecStore, VectorRecord, VectorSearchResult
 from .search import HybridSearchService, SearchResult
@@ -57,8 +63,13 @@ __all__ = [
     "content_hash",
     "is_sqlite_vec_available",
     # Embedder
+    "OnnxEmbedder",
     "SentenceTransformerEmbedder",
+    "create_embedder",
+    "download_onnx_model",
+    "is_onnx_available",
     "is_sentence_transformers_available",
+    "is_any_backend_available",
     # Indexer
     "MemoryIndexer",
     "chunk_text",
