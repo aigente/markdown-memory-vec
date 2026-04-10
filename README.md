@@ -32,7 +32,7 @@ pip install 'markdown-memory-vec[vector]'
 ```python
 from memory_vec import MemoryVectorService
 
-svc = MemoryVectorService("/path/to/project")
+svc = MemoryVectorService("/path/to/project/.claude/memory")
 svc.rebuild_index()                        # Full index build
 results = svc.search("how to deploy")      # Hybrid search
 svc.close()
@@ -64,23 +64,23 @@ for r in results:
 ## CLI Usage
 
 ```bash
-# Full rebuild
-memory-vec /path/to/project --rebuild
+# Full rebuild (pass the memory directory directly)
+memory-vec /path/to/project/.claude/memory --rebuild
 
 # Incremental update (only changed files)
-memory-vec /path/to/project --incremental
+memory-vec /path/to/project/.claude/memory --incremental
 
 # Search
-memory-vec /path/to/project --search "how to deploy" --top-k 5
+memory-vec /path/to/project/.claude/memory --search "how to deploy" --top-k 5
 
 # Statistics
-memory-vec /path/to/project --stats
+memory-vec /path/to/project/.claude/memory --stats
 
-# Custom memory subdirectory
-memory-vec /path/to/project --rebuild --memory-subdir "docs/memory"
+# Or use --memory-subdir to compose the path from workspace root
+memory-vec /path/to/project --memory-subdir .claude/memory --rebuild
 
 # Verbose logging
-memory-vec /path/to/project --rebuild -v
+memory-vec /path/to/project/.claude/memory --rebuild -v
 ```
 
 ## API Reference
@@ -146,7 +146,7 @@ memory-vec /path/to/project --rebuild -v
      │         importance/type/tags          ▼
    ┌─┴─────────────────────┐     ┌─────────────────────┐
    │    Markdown Files     │     │   vector_index.db    │
-   │   (.claude/memory/)   │     │   (single file)      │
+   │  (caller-specified)   │     │   (single file)      │
    └───────────────────────┘     └─────────────────────┘
 ```
 

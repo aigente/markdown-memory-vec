@@ -16,8 +16,12 @@ from memory_vec.service import MemoryVectorService
 
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
-    """Create a temporary workspace with memory directory and .md files."""
-    mem_dir = tmp_path / ".claude" / "memory"
+    """Create a temporary memory directory with .md files.
+
+    Returns the memory directory itself (not a workspace root), matching
+    the ``MemoryVectorService(memory_dir=...)`` contract.
+    """
+    mem_dir = tmp_path / "memory"
     mem_dir.mkdir(parents=True)
 
     (mem_dir / "Memory.md").write_text("# Shared Memory\n\nSome shared content.")
@@ -25,24 +29,24 @@ def workspace(tmp_path: Path) -> Path:
     personal_dir.mkdir()
     (personal_dir / "Memory.md").write_text("# Personal Memory\n\nSome personal content.")
 
-    return tmp_path
+    return mem_dir
 
 
 class TestMemoryVectorServiceInit:
     """Tests for service initialization."""
 
-    def test_default_memory_subdir(self, workspace: Path) -> None:
-        """Default memory_subdir should be .claude/memory."""
+    def test_memory_dir_is_used_directly(self, workspace: Path) -> None:
+        """memory_dir should be used as-is — no subdirectory appended."""
         svc = MemoryVectorService(workspace)
-        assert svc.memory_root == workspace / ".claude" / "memory"
-        assert svc.db_path == workspace / ".claude" / "memory" / "vector_index.db"
+        assert svc.memory_root == workspace
+        assert svc.db_path == workspace / "vector_index.db"
 
-    def test_custom_memory_subdir(self, workspace: Path) -> None:
-        """Custom memory_subdir should be respected."""
-        custom_dir = workspace / "docs" / "memory"
+    def test_custom_memory_dir(self, tmp_path: Path) -> None:
+        """An arbitrary directory can be used as memory_dir."""
+        custom_dir = tmp_path / "docs" / "memory"
         custom_dir.mkdir(parents=True)
-        svc = MemoryVectorService(workspace, memory_subdir="docs/memory")
-        assert svc.memory_root == workspace / "docs" / "memory"
+        svc = MemoryVectorService(custom_dir)
+        assert svc.memory_root == custom_dir
 
     def test_is_available_when_deps_missing(self) -> None:
         """is_available should return False when dependencies are missing."""
