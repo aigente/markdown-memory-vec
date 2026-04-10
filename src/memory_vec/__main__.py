@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
 from .service import MemoryVectorService
@@ -21,17 +22,20 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  memory-vec /path/to/project --rebuild\n"
-            "  memory-vec /path/to/project --incremental\n"
-            "  memory-vec /path/to/project --search 'how to deploy'\n"
-            "  memory-vec /path/to/project --stats\n"
+            "  memory-vec /path/to/memory --rebuild\n"
+            "  memory-vec /path/to/memory --incremental\n"
+            "  memory-vec /path/to/memory --search 'how to deploy'\n"
+            "  memory-vec /path/to/memory --stats\n"
+            "\n"
+            "  # Convenience: pass a workspace root and a --memory-subdir\n"
+            "  memory-vec /path/to/project --memory-subdir .claude/memory --rebuild\n"
             "\n"
             "Environment variables:\n"
             "  HF_ENDPOINT      HuggingFace mirror URL (e.g. https://hf-mirror.com)\n"
             "  HF_HUB_OFFLINE   Set to '1' to disable network access\n"
         ),
     )
-    parser.add_argument("workspace", help="Project root directory")
+    parser.add_argument("workspace", help="Memory directory (or project root when combined with --memory-subdir)")
     parser.add_argument("--rebuild", action="store_true", help="Full rebuild of vector index")
     parser.add_argument("--incremental", action="store_true", help="Incremental re-index (only changed files)")
     parser.add_argument("--search", type=str, help="Search memories by query")
@@ -46,8 +50,9 @@ def main() -> None:
     parser.add_argument(
         "--memory-subdir",
         type=str,
-        default=".claude/memory",
-        help="Memory subdirectory relative to workspace (default: .claude/memory)",
+        default="",
+        help="Optional subdirectory relative to workspace (e.g. '.claude/memory'). "
+        "When set, the indexed directory is workspace/memory-subdir.",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
 
@@ -58,10 +63,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    memory_dir = os.path.join(args.workspace, args.memory_subdir) if args.memory_subdir else args.workspace
     svc = MemoryVectorService(
-        args.workspace,
+        memory_dir,
         model_name=args.model,
-        memory_subdir=args.memory_subdir,
     )
 
     if not svc.is_available:

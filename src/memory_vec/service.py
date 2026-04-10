@@ -14,7 +14,7 @@ Usage from Python::
 
     from memory_vec import MemoryVectorService
 
-    svc = MemoryVectorService("/path/to/project")
+    svc = MemoryVectorService("/path/to/project/.claude/memory")
     svc.rebuild_index()  # Full rebuild
     svc.incremental_index()  # Only changed files
     results = svc.search("query")  # Hybrid search
@@ -31,39 +31,32 @@ logger = logging.getLogger(__name__)
 # Default DB filename inside the memory directory
 _DEFAULT_DB_NAME = "vector_index.db"
 
-# Default memory subdirectory relative to workspace root
-_DEFAULT_MEMORY_SUBDIR = ".claude/memory"
-
 
 class MemoryVectorService:
-    """High-level service that wires up all vector components for a workspace.
+    """High-level service that wires up all vector components for a directory.
 
     This is the single entry point for all vector-related operations on a
-    project's memory directory.
+    directory of Markdown files.
 
     Parameters
     ----------
-    workspace_root:
-        The project root directory (e.g., the repo root).  The memory files
-        are expected at ``{workspace_root}/{memory_subdir}/``.
+    memory_dir:
+        The directory containing Markdown files to index and search.
+        The caller is responsible for resolving the full path — this class
+        does **not** append any subdirectory.
     db_name:
-        SQLite database filename (created inside the memory directory).
+        SQLite database filename (created inside *memory_dir*).
     model_name:
         Sentence-transformer model name for embeddings.
-    memory_subdir:
-        Subdirectory under *workspace_root* where memory files live.
-        Defaults to ``".claude/memory"``.
     """
 
     def __init__(
         self,
-        workspace_root: str | Path,
+        memory_dir: str | Path,
         db_name: str = _DEFAULT_DB_NAME,
         model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
-        memory_subdir: str = _DEFAULT_MEMORY_SUBDIR,
     ) -> None:
-        self._workspace = Path(workspace_root)
-        self._memory_root = self._workspace / memory_subdir
+        self._memory_root = Path(memory_dir)
         self._db_path = self._memory_root / db_name
         self._model_name = model_name
 
