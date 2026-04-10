@@ -436,11 +436,17 @@ class SqliteVecStore(ISqliteVecStore):
     def close(self) -> None:
         """Close the underlying SQLite connection."""
         if self._conn is not None:
-            self._conn.close()
+            try:
+                self._conn.close()
+            except Exception:
+                pass  # Cross-thread close — already handled by GC
             self._conn = None
 
     def __del__(self) -> None:
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
