@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+import rjieba  # Rust-based Chinese word segmentation (required dependency)
+
 from .interfaces import ISqliteVecStore, VectorRecord, VectorSearchResult
 
 logger = logging.getLogger(__name__)
@@ -39,8 +41,6 @@ logger = logging.getLogger(__name__)
 #
 # We use rjieba (Rust-based jieba) for proper Chinese word segmentation on
 # CJK text runs, while leaving English/ASCII text untouched.
-
-import rjieba  # Rust-based Chinese word segmentation (required dependency)
 
 # Regex to match runs of CJK characters (Chinese/Japanese Kanji/Korean Hanja)
 _CJK_RANGE = re.compile(
@@ -77,6 +77,7 @@ def _cjk_segment(text: str) -> str:
         lambda m: " ".join(rjieba.cut(m.group(), False)),
         text,
     )
+
 
 # ---------------------------------------------------------------------------
 # Availability flag
@@ -231,9 +232,7 @@ class SqliteVecStore(ISqliteVecStore):
         )
 
         # FTS version tracking — triggers re-tokenization when logic changes
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS _fts_meta (key TEXT PRIMARY KEY, value TEXT)"
-        )
+        conn.execute("CREATE TABLE IF NOT EXISTS _fts_meta (key TEXT PRIMARY KEY, value TEXT)")
 
         conn.commit()
 
@@ -338,10 +337,8 @@ class SqliteVecStore(ISqliteVecStore):
 
         try:
             rows = self.connection.execute(
-                "SELECT rowid, rank FROM memory_fts "
-                "WHERE memory_fts MATCH ? "
-                "ORDER BY rank "
-                "LIMIT ?",
+                """SELECT rowid, rank FROM memory_fts
+                   WHERE memory_fts MATCH ? ORDER BY rank LIMIT ?""",
                 (safe_query, top_k),
             ).fetchall()
         except Exception:

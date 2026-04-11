@@ -461,7 +461,7 @@ class TestHybridSearchEndToEnd:
     """End-to-end tests: index markdown files, then search with different modes."""
 
     @pytest.fixture
-    def indexed_store(self, tmp_path: "pytest.TempPathFactory") -> tuple[SqliteVecStore, FakeEmbedder]:
+    def indexed_store(self) -> tuple[SqliteVecStore, FakeEmbedder]:
         """Create a store with indexed content for searching."""
         store = SqliteVecStore(db_path=":memory:", dimension=_DIM)
         store.ensure_tables()
@@ -486,9 +486,7 @@ class TestHybridSearchEndToEnd:
             )
         return store, embedder
 
-    def test_vector_only_returns_results(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_vector_only_returns_results(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """Vector-only search should return results based on embedding similarity."""
         store, embedder = indexed_store
         svc = HybridSearchService(store, embedder)
@@ -496,9 +494,7 @@ class TestHybridSearchEndToEnd:
         assert len(results) > 0
         assert all(r.fts_score == 0.0 for r in results)
 
-    def test_fts_only_returns_keyword_matches(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_fts_only_returns_keyword_matches(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """FTS-only should return results matching keywords."""
         store, embedder = indexed_store
         svc = HybridSearchService(store, embedder)
@@ -507,9 +503,7 @@ class TestHybridSearchEndToEnd:
         assert all(r.fts_score > 0 for r in results)
         assert all(r.semantic_score == 0.0 for r in results)
 
-    def test_hybrid_combines_both(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_hybrid_combines_both(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """Hybrid mode should combine vector and FTS results."""
         store, embedder = indexed_store
         svc = HybridSearchService(store, embedder)
@@ -519,9 +513,7 @@ class TestHybridSearchEndToEnd:
         file_paths = {r.file_path for r in results}
         assert "deploy.md" in file_paths or "deploy2.md" in file_paths
 
-    def test_fts_only_unique_keyword(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_fts_only_unique_keyword(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """FTS-only with a unique keyword should return exactly one result."""
         store, embedder = indexed_store
         svc = HybridSearchService(store, embedder)
@@ -529,9 +521,7 @@ class TestHybridSearchEndToEnd:
         assert len(results) == 1
         assert results[0].file_path == "deploy.md"
 
-    def test_hybrid_fts_boost(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_hybrid_fts_boost(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """In hybrid mode, a result matching both vector and FTS should score well."""
         store, embedder = indexed_store
         svc = HybridSearchService(store, embedder)
@@ -543,16 +533,12 @@ class TestHybridSearchEndToEnd:
         assert len(hybrid_results) > 0
         assert len(vector_results) > 0
 
-    def test_fts_count_matches_meta_count(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_fts_count_matches_meta_count(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """FTS row count should match metadata row count."""
         store, _ = indexed_store
         assert store.fts_count() == store.count()
 
-    def test_search_with_memory_type_filter(
-        self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_search_with_memory_type_filter(self, indexed_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """memory_type filter should work in all search modes."""
         store, embedder = indexed_store
         svc = HybridSearchService(store, embedder)
@@ -795,9 +781,7 @@ class TestCjkHybridSearchEndToEnd:
         # The memory.md should be highly ranked (keyword + semantic match)
         assert any(r.file_path == "memory.md" for r in results)
 
-    def test_all_modes_return_results_for_chinese(
-        self, cjk_store: tuple[SqliteVecStore, FakeEmbedder]
-    ) -> None:
+    def test_all_modes_return_results_for_chinese(self, cjk_store: tuple[SqliteVecStore, FakeEmbedder]) -> None:
         """All search modes should return results for Chinese queries."""
         store, embedder = cjk_store
         svc = HybridSearchService(store, embedder)

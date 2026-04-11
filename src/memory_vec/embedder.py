@@ -166,8 +166,7 @@ def _resolve_onnx_model_dir(model_name: str) -> Path | None:
 # ONNX model download from OSS (zip archive)
 # ---------------------------------------------------------------------------
 _OSS_MODEL_ZIP_DEFAULT = (
-    "https://aigente-studio.oss-cn-shanghai.aliyuncs.com"
-    "/models/onnx/paraphrase-multilingual-MiniLM-L12-v2.zip"
+    "https://aigente-studio.oss-cn-shanghai.aliyuncs.com" "/models/onnx/paraphrase-multilingual-MiniLM-L12-v2.zip"
 )
 
 
@@ -286,8 +285,7 @@ class OnnxEmbedder(IEmbedder):
     ) -> None:
         if not is_onnx_available():
             raise RuntimeError(
-                "onnxruntime and/or tokenizers not installed. "
-                "Install with: pip install 'markdown-memory-vec[onnx]'"
+                "onnxruntime and/or tokenizers not installed. " "Install with: pip install 'markdown-memory-vec[onnx]'"
             )
         self._model_name = model_name
         self._model_dir = Path(model_dir) if model_dir else None
@@ -324,9 +322,7 @@ class OnnxEmbedder(IEmbedder):
             if not tokenizer_path.exists():
                 tokenizer_path = model_dir.parent / "tokenizer.json"
             if not tokenizer_path.exists():
-                raise FileNotFoundError(
-                    f"tokenizer.json not found in {model_dir} or {model_dir.parent}"
-                )
+                raise FileNotFoundError(f"tokenizer.json not found in {model_dir} or {model_dir.parent}")
 
             logger.info("Loading ONNX model: %s", model_path)
             logger.info("Loading tokenizer: %s", tokenizer_path)
@@ -342,7 +338,8 @@ class OnnxEmbedder(IEmbedder):
             # Note: CoreMLExecutionProvider doesn't support dynamic-shape transformer
             # models (session.run() crashes on batch>1 due to unbounded dimensions).
             session = ort.InferenceSession(
-                str(model_path), sess_options=sess_options,
+                str(model_path),
+                sess_options=sess_options,
                 providers=["CPUExecutionProvider"],
             )
             logger.info("ONNX session using CPU provider")
@@ -441,8 +438,7 @@ class SentenceTransformerEmbedder(IEmbedder):
     def __init__(self, model_name: str = _DEFAULT_MODEL_NAME) -> None:
         if not is_sentence_transformers_available():
             raise RuntimeError(
-                "sentence-transformers is not installed. "
-                "Install it with: pip install 'markdown-memory-vec[vector]'"
+                "sentence-transformers is not installed. " "Install it with: pip install 'markdown-memory-vec[vector]'"
             )
         self._model_name = model_name
         self._dimension_override: int | None = None
@@ -512,8 +508,7 @@ def create_embedder(
         # Model files not found locally — try downloading from OSS
         if onnx_dir is None:
             logger.info(
-                "ONNX model files not found locally for '%s', "
-                "attempting download from OSS...",
+                "ONNX model files not found locally for '%s', " "attempting download from OSS...",
                 model_name,
             )
             try:
@@ -527,8 +522,7 @@ def create_embedder(
             return OnnxEmbedder(model_name=model_name)
         else:
             logger.info(
-                "ONNX model not available for '%s', "
-                "falling back to sentence-transformers",
+                "ONNX model not available for '%s', " "falling back to sentence-transformers",
                 model_name,
             )
 
