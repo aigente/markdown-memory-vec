@@ -1,29 +1,29 @@
 # markdown-memory-vec
 
-Lightweight vector search for Markdown-based memory systems. Chunk, embed, index, and hybrid-search your `.md` knowledge base with sqlite-vec.
-
-<!-- Badges -->
-<!-- [![PyPI version](https://badge.fury.io/py/markdown-memory-vec.svg)](https://pypi.org/project/markdown-memory-vec/) -->
-<!-- [![Python](https://img.shields.io/pypi/pyversions/markdown-memory-vec.svg)](https://pypi.org/project/markdown-memory-vec/) -->
-<!-- [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) -->
+Lightweight vector search for Markdown-based memory systems. Chunk, embed, index, and hybrid-search your `.md` knowledge base with sqlite-vec + FTS5.
 
 ## Features
 
+- **Hybrid search**: Three modes — `vector_only` (semantic KNN), `fts_only` (BM25 keywords), `hybrid` (RRF fusion, default)
+- **CJK support**: rjieba-powered Chinese word segmentation for FTS5, English untouched
+- **Dual embedding backend**: ONNX Runtime (~55 MB) or sentence-transformers (~1.5 GB), auto-detected
 - **Markdown-native**: YAML frontmatter parsing for metadata (importance, type, tags)
 - **Smart chunking**: Paragraph-aware splitting with configurable overlap (~400 tokens, 80 overlap)
 - **SHA-256 dedup**: Never re-embed unchanged content — incremental indexing is fast
-- **Hybrid search**: Combines semantic similarity (α), importance weighting (β), and temporal decay (γ)
-- **Zero-copy storage**: sqlite-vec KNN search with cosine distance in a single `.db` file
+- **Single-file storage**: sqlite-vec KNN + FTS5 full-text + metadata in one `.db` file
 
 ## Quick Start
 
 ### Installation
 
 ```bash
-# Core only (YAML parsing, chunking, interfaces)
+# Core (YAML parsing, chunking, interfaces, CJK segmentation)
 pip install markdown-memory-vec
 
-# With vector search support (sqlite-vec + sentence-transformers)
+# With ONNX embedding (lightweight, recommended)
+pip install 'markdown-memory-vec[onnx]'
+
+# With sentence-transformers embedding (full-featured)
 pip install 'markdown-memory-vec[vector]'
 ```
 
@@ -32,9 +32,18 @@ pip install 'markdown-memory-vec[vector]'
 ```python
 from memory_vec import MemoryVectorService
 
-svc = MemoryVectorService("/path/to/project/.claude/memory")
-svc.rebuild_index()                        # Full index build
-results = svc.search("how to deploy")      # Hybrid search
+svc = MemoryVectorService("/path/to/memory")
+svc.rebuild_index()
+
+# Default: hybrid mode (vector + FTS5 fused via RRF)
+results = svc.search("how to deploy")
+
+# Keyword-only (fast, no embedding needed for query)
+results = svc.search("部署 kubernetes", mode="fts_only")
+
+# Semantic-only (original behavior)
+results = svc.search("deployment strategies", mode="vector_only")
+
 svc.close()
 ```
 
@@ -43,45 +52,65 @@ svc.close()
 ```python
 from memory_vec import (
     SqliteVecStore,
-    SentenceTransformerEmbedder,
+    create_embedder,
     MemoryIndexer,
     HybridSearchService,
+    SearchMode,
 )
 
 store = SqliteVecStore("memory.db")
 store.ensure_tables()
 
-embedder = SentenceTransformerEmbedder()
+embedder = create_embedder()  # auto-detects ONNX or sentence-transformers
 indexer = MemoryIndexer(store, embedder, memory_root="/path/to/memory")
 indexer.index_directory("/path/to/memory")
 
 search = HybridSearchService(vec_store=store, embedder=embedder)
-results = search.search("how to deploy")
+
+# Hybrid (default) — fuses vector KNN + FTS5 BM25 via Reciprocal Rank Fusion
+results = search.search("how to deploy", mode=SearchMode.HYBRID)
+
 for r in results:
     print(f"{r.file_path} (score={r.hybrid_score:.3f}): {r.chunk_text[:80]}...")
 ```
 
-## CLI Usage
+## CLI
 
 ```bash
-# Full rebuild (pass the memory directory directly)
-memory-vec /path/to/project/.claude/memory --rebuild
+# Full rebuild
+memory-vec /path/to/memory --rebuild
 
 # Incremental update (only changed files)
-memory-vec /path/to/project/.claude/memory --incremental
+memory-vec /path/to/memory --incremental
 
-# Search
-memory-vec /path/to/project/.claude/memory --search "how to deploy" --top-k 5
+# Search (default: hybrid mode)
+memory-vec /path/to/memory --search "how to deploy" --top-k 5
+
+# Search with specific mode
+memory-vec /path/to/memory --search "桌面端构建" --mode fts_only
 
 # Statistics
-memory-vec /path/to/project/.claude/memory --stats
-
-# Or use --memory-subdir to compose the path from workspace root
-memory-vec /path/to/project --memory-subdir .claude/memory --rebuild
+memory-vec /path/to/memory --stats
 
 # Verbose logging
-memory-vec /path/to/project/.claude/memory --rebuild -v
+memory-vec /path/to/memory --rebuild -v
 ```
+
+## Search Modes
+
+| Mode | Relevance Signal | Best For |
+|------|-----------------|----------|
+| `hybrid` (default) | RRF(vector, FTS5) | General use — combines semantic understanding with keyword precision |
+| `vector_only` | Cosine similarity | Conceptual/semantic queries where exact words don't matter |
+| `fts_only` | BM25 | Exact keyword/term lookup, fastest (~2ms) |
+
+All modes apply the same final scoring:
+
+```
+score = α × relevance + β × importance + γ × temporal_decay
+```
+
+Where `relevance` is cosine similarity, normalized BM25, or normalized RRF score depending on mode.
 
 ## API Reference
 
@@ -89,16 +118,18 @@ memory-vec /path/to/project/.claude/memory --rebuild -v
 
 | Class | Description |
 |-------|-------------|
-| `MemoryVectorService` | All-in-one service: rebuild, incremental index, search, stats |
+| `MemoryVectorService` | All-in-one: rebuild, incremental index, search, stats |
 
 ### Components
 
 | Class | Description |
 |-------|-------------|
-| `SqliteVecStore` | sqlite-vec backed vector store with KNN search |
-| `SentenceTransformerEmbedder` | Lazy-loading sentence-transformers embedder |
+| `SqliteVecStore` | sqlite-vec KNN + FTS5 full-text + metadata storage |
+| `OnnxEmbedder` | Lightweight ONNX Runtime embedder (~55 MB) |
+| `SentenceTransformerEmbedder` | Full sentence-transformers embedder (~1.5 GB) |
+| `create_embedder()` | Factory — picks best available backend (ONNX preferred) |
 | `MemoryIndexer` | Markdown → chunks → embeddings → store pipeline |
-| `HybridSearchService` | Hybrid scoring: `α×semantic + β×importance + γ×temporal` |
+| `HybridSearchService` | Multi-mode search with RRF fusion and hybrid scoring |
 
 ### Interfaces
 
@@ -111,62 +142,61 @@ memory-vec /path/to/project/.claude/memory --rebuild -v
 
 | Type | Description |
 |------|-------------|
+| `SearchMode` | Enum: `HYBRID`, `VECTOR_ONLY`, `FTS_ONLY` |
+| `SearchResult` | Result with `hybrid_score`, `semantic_score`, `fts_score`, `rrf_score` |
 | `VectorRecord` | Record for insertion (id, embedding, metadata) |
 | `VectorSearchResult` | Raw KNN result (id, distance, metadata) |
-| `SearchResult` | Hybrid search result with all score components |
-| `MemoryVecMeta` | Metadata dataclass for stored embeddings |
 
 ### Utilities
 
 | Function | Description |
 |----------|-------------|
+| `reciprocal_rank_fusion(ranked_lists, k)` | RRF score fusion from multiple ranked lists |
 | `chunk_text(text, chunk_size, overlap_size)` | Split text into overlapping chunks |
 | `parse_frontmatter(text)` | Extract YAML frontmatter from Markdown |
 | `content_hash(text)` | SHA-256 hex digest |
-| `is_sqlite_vec_available()` | Check sqlite-vec availability |
-| `is_sentence_transformers_available()` | Check sentence-transformers availability |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                MemoryVectorService                  │
-│          (high-level orchestration layer)            │
-├──────────┬──────────┬──────────────┬────────────────┤
-│          │          │              │                 │
-│  Indexer  │  Search  │   Embedder   │     Store      │
-│          │          │              │                 │
-│ .md file │  hybrid  │  sentence-   │  sqlite-vec    │
-│ → chunks │  scoring │  transformers│  KNN + meta    │
-│ → embed  │  α+β+γ   │  (lazy load) │  (cosine)      │
-│ → store  │          │              │                 │
-└──────────┴──────────┴──────────────┴────────────────┘
-     ▲                                      │
-     │         YAML frontmatter             │
-     │         importance/type/tags          ▼
-   ┌─┴─────────────────────┐     ┌─────────────────────┐
-   │    Markdown Files     │     │   vector_index.db    │
-   │  (caller-specified)   │     │   (single file)      │
-   └───────────────────────┘     └─────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                  MemoryVectorService                     │
+│            (high-level orchestration layer)               │
+├──────────┬───────────┬──────────────┬────────────────────┤
+│          │           │              │                     │
+│ Indexer  │  Search   │  Embedder    │      Store          │
+│          │           │              │                     │
+│ .md file │ 3 modes:  │ ONNX or      │ sqlite-vec KNN     │
+│ → chunk  │  hybrid   │ sentence-    │ + FTS5 full-text   │
+│ → embed  │  vector   │ transformers │ + metadata table   │
+│ → store  │  fts      │ (auto-detect)│ (single .db file)  │
+│          │ + RRF     │              │                     │
+└──────────┴───────────┴──────────────┴────────────────────┘
+     ▲          │                              │
+     │   rjieba CJK segmentation              │
+     │   (Chinese word splitting)              ▼
+   ┌─┴────────────────────────┐    ┌──────────────────────┐
+   │     Markdown Files       │    │   vector_index.db    │
+   │   (caller-specified)     │    │   (vec0 + FTS5 +     │
+   └──────────────────────────┘    │    meta + version)   │
+                                   └──────────────────────┘
 ```
 
 ## Configuration
 
-### HuggingFace Model
+### Embedding Model
 
-By default, uses `paraphrase-multilingual-MiniLM-L12-v2` (384-dim, 50+ languages).
-
-For users in China or regions with slow HuggingFace access:
+Default: `paraphrase-multilingual-MiniLM-L12-v2` (384-dim, 50+ languages).
 
 ```bash
-# Use a mirror
+# For regions with slow HuggingFace access
 export HF_ENDPOINT=https://hf-mirror.com
 
-# Or use offline mode (model must be pre-cached)
+# Offline mode (model must be pre-cached)
 export HF_HUB_OFFLINE=1
 ```
 
-### Hybrid Search Weights
+### Search Weights
 
 Default: `α=0.6, β=0.2, γ=0.2, λ=0.05`
 
@@ -174,10 +204,11 @@ Default: `α=0.6, β=0.2, γ=0.2, λ=0.05`
 search = HybridSearchService(
     vec_store=store,
     embedder=embedder,
-    alpha=0.8,    # Semantic weight
-    beta=0.1,     # Importance weight
-    gamma=0.1,    # Temporal decay weight
-    decay_lambda=0.03,  # Slower decay
+    alpha=0.8,         # Relevance weight
+    beta=0.1,          # Importance weight
+    gamma=0.1,         # Temporal decay weight
+    decay_lambda=0.03, # Slower decay
+    rrf_k=60,          # RRF constant (higher = less top-rank bias)
 )
 ```
 
