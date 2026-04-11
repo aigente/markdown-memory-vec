@@ -451,14 +451,35 @@ class HybridSearchService:
         """
         Compute the weighted hybrid score.
 
+        When importance or temporal_decay are at their neutral defaults
+        (0.5), they contribute a constant offset without discriminating
+        between results.  Their weight is redistributed to *relevance_score*
+        so the output better reflects actual retrieval quality.
+
         Args:
             relevance_score: Relevance score [0, 1] — cosine similarity in
                 vector_only mode, normalised BM25 in fts_only, or normalised
                 RRF in hybrid mode.
             importance: Importance weight from frontmatter [0, 1].
+                0.5 is treated as "unknown" (default when no frontmatter).
             temporal_decay: Temporal decay factor [0, 1].
+                0.5 is the sentinel returned by :meth:`compute_temporal_decay`
+                when ``last_accessed`` is ``None``.
 
         Returns:
-            Weighted hybrid score = α × relevance + β × importance + γ × temporal_decay.
+            Weighted hybrid score with dynamic weight redistribution.
         """
-        return self.alpha * relevance_score + self.beta * importance + self.gamma * temporal_decay
+        eff_alpha = self.alpha
+        eff_beta = self.beta
+        eff_gamma = self.gamma
+
+        # importance == 0.5 → no frontmatter → dead signal
+        if importance == 0.5:
+            eff_alpha += eff_beta
+            eff_beta = 0.0
+        # temporal_decay == 0.5 → no last_accessed → dead signal
+        if temporal_decay == 0.5:
+            eff_alpha += eff_gamma
+            eff_gamma = 0.0
+
+        return eff_alpha * relevance_score + eff_beta * importance + eff_gamma * temporal_decay

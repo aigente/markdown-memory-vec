@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
-from memory_vec.search import HybridSearchService
+from memory_vec.search import HybridSearchService, SearchMode
 
 from .conftest import FakeEmbedder, FakeVecStore, make_search_result
 
@@ -64,6 +64,36 @@ class TestHybridSearchServiceScoring:
         svc = HybridSearchService(fake_vec_store, fake_embedder)
         score = svc.compute_hybrid_score(1.0, 1.0, 1.0)
         assert abs(score - 1.0) < 1e-10
+
+    def test_neutral_importance_redistributes_weight(
+        self, fake_embedder: FakeEmbedder, fake_vec_store: FakeVecStore
+    ) -> None:
+        """importance=0.5 (default) should redistribute β weight to relevance."""
+        svc = HybridSearchService(fake_vec_store, fake_embedder)
+        # importance=0.5 → dead signal, β redistributed to α
+        # effective: (α+β)×rel + γ×decay = 0.8×0.9 + 0.2×0.7 = 0.86
+        score = svc.compute_hybrid_score(0.9, 0.5, 0.7)
+        expected = 0.8 * 0.9 + 0.2 * 0.7
+        assert abs(score - expected) < 1e-10
+
+    def test_neutral_temporal_redistributes_weight(
+        self, fake_embedder: FakeEmbedder, fake_vec_store: FakeVecStore
+    ) -> None:
+        """temporal_decay=0.5 (no last_accessed) should redistribute γ weight to relevance."""
+        svc = HybridSearchService(fake_vec_store, fake_embedder)
+        # temporal=0.5 → dead signal, γ redistributed to α
+        # effective: (α+γ)×rel + β×imp = 0.8×0.9 + 0.2×0.8 = 0.88
+        score = svc.compute_hybrid_score(0.9, 0.8, 0.5)
+        expected = 0.8 * 0.9 + 0.2 * 0.8
+        assert abs(score - expected) < 1e-10
+
+    def test_both_neutral_gives_pure_relevance(
+        self, fake_embedder: FakeEmbedder, fake_vec_store: FakeVecStore
+    ) -> None:
+        """Both signals neutral → score equals pure relevance."""
+        svc = HybridSearchService(fake_vec_store, fake_embedder)
+        score = svc.compute_hybrid_score(0.73, 0.5, 0.5)
+        assert abs(score - 0.73) < 1e-10
 
 
 # ============================================================================
@@ -207,7 +237,8 @@ class TestHybridSearch:
         store.search = MagicMock(return_value=[])  # type: ignore[assignment]
         svc = HybridSearchService(store, fake_embedder)
 
-        svc.search("query", memory_type="episodic")
+        # Use vector_only to test filter passthrough without triggering FTS/hybrid paths
+        svc.search("query", memory_type="episodic", mode=SearchMode.VECTOR_ONLY)
         store.search.assert_called_once()
         call_kwargs = store.search.call_args
         assert call_kwargs[1]["filter_metadata"] == {"memory_type": "episodic"}
