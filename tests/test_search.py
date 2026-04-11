@@ -46,7 +46,7 @@ class TestHybridSearchServiceScoring:
         """Test the hybrid score formula: score = α×sem + β×imp + γ×decay."""
         svc = HybridSearchService(fake_vec_store, fake_embedder)
         score = svc.compute_hybrid_score(
-            semantic_score=0.9,
+            relevance_score=0.9,
             importance=0.8,
             temporal_decay=0.7,
         )

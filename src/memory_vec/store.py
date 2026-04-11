@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json as _json
 import logging
+import re
 import sqlite3
 import struct
 from dataclasses import dataclass, field
@@ -28,6 +29,54 @@ from typing import Any, Dict, List, Optional, Sequence
 from .interfaces import ISqliteVecStore, VectorRecord, VectorSearchResult
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# CJK-aware text segmentation for FTS5
+# ---------------------------------------------------------------------------
+# SQLite FTS5's unicode61 tokenizer treats continuous CJK characters as a
+# single token (e.g. "桌面端构建" → one token).  This makes Chinese queries
+# fail because "桌面端" is a different token from "桌面端构建打包".
+#
+# We use rjieba (Rust-based jieba) for proper Chinese word segmentation on
+# CJK text runs, while leaving English/ASCII text untouched.
+
+import rjieba  # Rust-based Chinese word segmentation (required dependency)
+
+# Regex to match runs of CJK characters (Chinese/Japanese Kanji/Korean Hanja)
+_CJK_RANGE = re.compile(
+    r"["
+    r"\u2e80-\u2eff"  # CJK Radicals Supplement
+    r"\u3400-\u4dbf"  # CJK Unified Ideographs Extension A
+    r"\u4e00-\u9fff"  # CJK Unified Ideographs (main block)
+    r"\uf900-\ufaff"  # CJK Compatibility Ideographs
+    r"\U00020000-\U0002a6df"  # CJK Extension B
+    r"\U0002a700-\U0002ebef"  # CJK Extensions C-F
+    r"]+"
+)
+
+# FTS tokenization version — bump when changing tokenization logic to
+# trigger automatic re-tokenization of the FTS5 index.
+# v2: character-level CJK segmentation
+# v3: rjieba word-level CJK segmentation
+_FTS_VERSION = 3
+
+
+def _cjk_segment(text: str) -> str:
+    """Segment CJK runs into words using rjieba, leaving non-CJK text intact.
+
+    Examples::
+
+        >>> _cjk_segment("桌面端构建打包")
+        '桌面 端 构建 打包'
+        >>> _cjk_segment("deploy to 生产环境")
+        'deploy to 生产 环境'
+        >>> _cjk_segment("How to deploy on AWS")
+        'How to deploy on AWS'
+    """
+    return _CJK_RANGE.sub(
+        lambda m: " ".join(rjieba.cut(m.group(), False)),
+        text,
+    )
 
 # ---------------------------------------------------------------------------
 # Availability flag
@@ -132,7 +181,7 @@ class SqliteVecStore(ISqliteVecStore):
     # -- schema --------------------------------------------------------------
 
     def ensure_tables(self) -> None:
-        """Create the vec0 virtual table and the metadata table if they don't exist."""
+        """Create the vec0 virtual table, metadata table, and FTS5 table if they don't exist."""
         conn = self.connection
 
         # vec0 virtual table (raw SQL required)
@@ -171,7 +220,143 @@ class SqliteVecStore(ISqliteVecStore):
         )
         conn.execute("CREATE INDEX IF NOT EXISTS ix_memory_vec_meta_file_path ON memory_vec_meta (file_path)")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_memory_vec_meta_content_hash ON memory_vec_meta (content_hash)")
+
+        # FTS5 full-text search table — shares rowid with memory_vec_meta
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                chunk_text
+            )
+            """
+        )
+
+        # FTS version tracking — triggers re-tokenization when logic changes
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _fts_meta (key TEXT PRIMARY KEY, value TEXT)"
+        )
+
         conn.commit()
+
+        # Backfill FTS5 from existing metadata if needed (one-time migration),
+        # and re-tokenize if _FTS_VERSION has bumped (e.g. CJK segmentation added).
+        self._ensure_fts_version()
+
+    # -- FTS5 helpers --------------------------------------------------------
+
+    def _ensure_fts_version(self) -> None:
+        """Check FTS tokenization version and re-build if outdated.
+
+        When ``_FTS_VERSION`` is bumped (e.g. CJK segmentation added), this
+        clears and re-populates the FTS5 table from ``memory_vec_meta``.
+        """
+        conn = self.connection
+        row = conn.execute("SELECT value FROM _fts_meta WHERE key = 'version'").fetchone()
+        current = int(row[0]) if row else 0
+
+        if current < _FTS_VERSION:
+            if current > 0:
+                logger.info("FTS version %d → %d, re-tokenizing index...", current, _FTS_VERSION)
+            self._backfill_fts(force=(current > 0))
+            conn.execute(
+                "INSERT OR REPLACE INTO _fts_meta (key, value) VALUES ('version', ?)",
+                (str(_FTS_VERSION),),
+            )
+            conn.commit()
+
+    def _backfill_fts(self, *, force: bool = False) -> None:
+        """Populate FTS5 table from memory_vec_meta.
+
+        This handles the migration case where an existing DB gets the new FTS5
+        table added, or when the tokenization logic changes (force=True).
+
+        When *force* is ``False`` (default), runs only if FTS5 is empty.
+        When *force* is ``True``, clears and re-populates unconditionally.
+        """
+        conn = self.connection
+
+        if not force:
+            fts_count = conn.execute("SELECT COUNT(*) FROM memory_fts").fetchone()[0]
+            if fts_count > 0:
+                return  # Already populated
+
+        meta_count = conn.execute("SELECT COUNT(*) FROM memory_vec_meta").fetchone()[0]
+        if meta_count == 0:
+            return  # Nothing to backfill
+
+        if force:
+            self._fts_clear()
+
+        logger.info("Backfilling FTS5 index from %d existing metadata rows (CJK-aware)...", meta_count)
+        rows = conn.execute("SELECT id, chunk_text FROM memory_vec_meta").fetchall()
+        for rowid, chunk_text in rows:
+            conn.execute(
+                "INSERT INTO memory_fts(rowid, chunk_text) VALUES (?, ?)",
+                (rowid, _cjk_segment(chunk_text)),
+            )
+        conn.commit()
+        logger.info("FTS5 backfill complete: %d rows", meta_count)
+
+    def _fts_insert(self, rowid: int, chunk_text: str) -> None:
+        """Insert a row into the FTS5 table (matching meta rowid)."""
+        self.connection.execute(
+            "INSERT INTO memory_fts(rowid, chunk_text) VALUES (?, ?)",
+            (rowid, _cjk_segment(chunk_text)),
+        )
+
+    def _fts_delete(self, rowid: int) -> None:
+        """Delete a row from the FTS5 table by rowid."""
+        self.connection.execute("DELETE FROM memory_fts WHERE rowid = ?", (rowid,))
+
+    def _fts_clear(self) -> None:
+        """Delete all rows from the FTS5 table."""
+        self.connection.execute("DELETE FROM memory_fts")
+
+    def search_fts(
+        self,
+        query: str,
+        top_k: int = 10,
+    ) -> list["_FtsRawResult"]:
+        """Full-text search via FTS5.
+
+        Returns the *top_k* best-matching rows ordered by BM25 relevance.
+        The ``rank`` column from FTS5 is *negative* (more negative = better match),
+        so we negate it to produce a positive relevance score.
+
+        CJK characters are segmented before querying so that Chinese/Japanese
+        queries can match individual characters indexed by :meth:`_fts_insert`.
+        """
+        if not query.strip():
+            return []
+
+        # Apply CJK segmentation then sanitize for FTS5: wrap each token in
+        # double quotes to avoid syntax errors from special characters.
+        segmented = _cjk_segment(query)
+        tokens = segmented.strip().split()
+        safe_query = " OR ".join(f'"{t}"' for t in tokens if t)
+        if not safe_query:
+            return []
+
+        try:
+            rows = self.connection.execute(
+                "SELECT rowid, rank FROM memory_fts "
+                "WHERE memory_fts MATCH ? "
+                "ORDER BY rank "
+                "LIMIT ?",
+                (safe_query, top_k),
+            ).fetchall()
+        except Exception:
+            logger.warning("FTS5 search failed for query %r", query, exc_info=True)
+            return []
+
+        return [
+            _FtsRawResult(rowid=r[0], bm25_score=-r[1])  # negate: more positive = better
+            for r in rows
+        ]
+
+    def fts_count(self) -> int:
+        """Return the number of rows in the FTS5 table."""
+        row = self.connection.execute("SELECT COUNT(*) FROM memory_fts").fetchone()
+        return row[0] if row else 0
 
     # =====================================================================
     # ISqliteVecStore interface implementation
@@ -245,6 +430,7 @@ class SqliteVecStore(ISqliteVecStore):
         conn = self.connection
         conn.execute(f"DELETE FROM {self._table_name}")
         conn.execute("DELETE FROM memory_vec_meta")
+        self._fts_clear()
         conn.commit()
 
     # =====================================================================
@@ -293,6 +479,8 @@ class SqliteVecStore(ISqliteVecStore):
                 now,
             ),
         )
+        # Sync FTS5 index
+        self._fts_insert(rowid, chunk_text)
         conn.commit()
         return rowid
 
@@ -323,10 +511,11 @@ class SqliteVecStore(ISqliteVecStore):
         ]
 
     def delete_embedding(self, rowid: int) -> None:
-        """Delete an embedding (and its metadata) by rowid."""
+        """Delete an embedding (and its metadata and FTS5 entry) by rowid."""
         conn = self.connection
         conn.execute(f"DELETE FROM {self._table_name} WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM memory_vec_meta WHERE id = ?", (rowid,))
+        self._fts_delete(rowid)
         conn.commit()
 
     def delete_by_file(self, file_path: str) -> int:
@@ -339,6 +528,9 @@ class SqliteVecStore(ISqliteVecStore):
         placeholders = ",".join("?" * len(rowids))
         conn.execute(f"DELETE FROM {self._table_name} WHERE rowid IN ({placeholders})", rowids)
         conn.execute(f"DELETE FROM memory_vec_meta WHERE id IN ({placeholders})", rowids)
+        # Sync FTS5 (batch delete)
+        fts_placeholders = ",".join("?" * len(rowids))
+        conn.execute(f"DELETE FROM memory_fts WHERE rowid IN ({fts_placeholders})", rowids)
         conn.commit()
         return len(rowids)
 
@@ -381,6 +573,12 @@ class SqliteVecStore(ISqliteVecStore):
             f"UPDATE memory_vec_meta SET {set_clause} WHERE id = ?",
             (*update_fields.values(), rowid),
         )
+
+        # Sync FTS5: delete old + re-insert with updated text
+        if chunk_text:
+            self._fts_delete(rowid)
+            self._fts_insert(rowid, chunk_text)
+
         conn.commit()
 
     def get_meta(self, rowid: int) -> Optional[Dict[str, Any]]:
@@ -450,8 +648,18 @@ class SqliteVecStore(ISqliteVecStore):
 
 
 # ---------------------------------------------------------------------------
-# Internal raw result (lighter than VectorSearchResult, used internally)
+# Internal raw results (lighter than VectorSearchResult, used internally)
 # ---------------------------------------------------------------------------
+class _FtsRawResult:
+    """A raw FTS5 search result."""
+
+    __slots__ = ("rowid", "bm25_score")
+
+    def __init__(self, rowid: int, bm25_score: float) -> None:
+        self.rowid = rowid
+        self.bm25_score = bm25_score  # Positive: higher = more relevant
+
+
 class _VecRawResult:
     """A raw KNN result row from the vec0 table."""
 
