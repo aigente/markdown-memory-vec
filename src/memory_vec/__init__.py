@@ -13,7 +13,9 @@ This package provides:
 - **Indexer** (``indexer.py``): ``MemoryIndexer`` — Markdown-to-vector indexing
   pipeline with chunking, SHA-256 dedup, and YAML frontmatter parsing
 - **Search** (``search.py``): ``HybridSearchService`` — hybrid retrieval
-  combining semantic similarity, importance, and temporal decay
+  combining semantic similarity, FTS5 keyword search (BM25), importance,
+  and temporal decay.  Supports three modes: ``vector_only``, ``fts_only``,
+  ``hybrid`` (default, uses Reciprocal Rank Fusion)
 
 All heavy dependencies are optional:
   - ``pip install 'markdown-memory-vec[onnx]'``   → onnxruntime + tokenizers (~55 MB)
@@ -47,7 +49,7 @@ from .embedder import (
 )
 from .indexer import MemoryIndexer, chunk_text, parse_frontmatter
 from .interfaces import IEmbedder, ISqliteVecStore, VectorRecord, VectorSearchResult
-from .search import HybridSearchService, SearchResult
+from .search import HybridSearchService, SearchMode, SearchResult, reciprocal_rank_fusion
 from .service import MemoryVectorService
 from .store import MemoryVecMeta, SqliteVecStore, content_hash, is_sqlite_vec_available
 
@@ -76,7 +78,9 @@ __all__ = [
     "parse_frontmatter",
     # Search
     "HybridSearchService",
+    "SearchMode",
     "SearchResult",
+    "reciprocal_rank_fusion",
     # High-level service
     "MemoryVectorService",
 ]

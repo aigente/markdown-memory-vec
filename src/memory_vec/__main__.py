@@ -42,6 +42,13 @@ def main() -> None:
     parser.add_argument("--stats", action="store_true", help="Show index statistics")
     parser.add_argument("--top-k", type=int, default=5, help="Number of search results (default: 5)")
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["hybrid", "vector_only", "fts_only"],
+        default="hybrid",
+        help="Search mode: hybrid (vector+FTS5, default), vector_only, or fts_only",
+    )
+    parser.add_argument(
         "--model",
         type=str,
         default="paraphrase-multilingual-MiniLM-L12-v2",
@@ -84,14 +91,19 @@ def main() -> None:
             print(f"Incremental index: {total} chunks updated")  # noqa: T201
 
         elif args.search:
-            results = svc.search(args.search, top_k=args.top_k)
+            results = svc.search(args.search, top_k=args.top_k, mode=args.mode)
             if not results:
                 print("No results found.")  # noqa: T201
             else:
                 for i, r in enumerate(results, 1):
                     print(f"\n--- Result {i} (score: {r['hybrid_score']}) ---")  # noqa: T201
                     print(f"File: {r['file_path']}")  # noqa: T201
-                    print(f"Type: {r['memory_type']}  Importance: {r['importance']}")  # noqa: T201
+                    scores = f"Type: {r['memory_type']}  Importance: {r['importance']}"
+                    if r.get("semantic_score"):
+                        scores += f"  Semantic: {r['semantic_score']}"
+                    if r.get("fts_score"):
+                        scores += f"  FTS: {r['fts_score']}"
+                    print(scores)  # noqa: T201
                     text = str(r["chunk_text"])
                     if len(text) > 200:
                         text = text[:200] + "..."

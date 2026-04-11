@@ -6,11 +6,14 @@ All tests use Fake/Mock implementations — no real models are downloaded.
 
 from __future__ import annotations
 
+import itertools
 from typing import Any, Dict, List, Optional, Sequence
-from uuid import uuid4
 
 import pytest
 from memory_vec.interfaces import VectorRecord, VectorSearchResult
+
+# Auto-incrementing ID counter for test search results (matches real store's int rowids)
+_id_counter = itertools.count(1)
 
 
 class FakeEmbedder:
@@ -31,12 +34,30 @@ class FakeEmbedder:
         return self._dim
 
 
+class FakeFtsResult:
+    """Fake FTS5 raw result."""
+
+    __slots__ = ("rowid", "bm25_score")
+
+    def __init__(self, rowid: int, bm25_score: float) -> None:
+        self.rowid = rowid
+        self.bm25_score = bm25_score
+
+
 class FakeVecStore:
-    """Fake vector store for testing — stores records in memory and returns preset results."""
+    """Fake vector store for testing — stores records in memory and returns preset results.
+
+    Supports the full interface needed by HybridSearchService including
+    ``get_meta(rowid)`` and ``search_fts(query, top_k)`` for hybrid/FTS modes.
+    """
 
     def __init__(self, search_results: Optional[List[VectorSearchResult]] = None):
         self._records: List[VectorRecord] = []
         self._search_results = search_results or []
+        # Build an internal metadata lookup keyed by result.id
+        self._meta_by_id: Dict[str, Dict[str, Any]] = {}
+        for r in self._search_results:
+            self._meta_by_id[r.id] = r.metadata
 
     def add(self, records: Sequence[VectorRecord]) -> None:
         self._records.extend(records)
@@ -57,6 +78,24 @@ class FakeVecStore:
 
     def count(self) -> int:
         return len(self._records)
+
+    def get_meta(self, rowid: int) -> Optional[Dict[str, Any]]:
+        """Look up metadata by rowid (integer → string key lookup)."""
+        return self._meta_by_id.get(str(rowid))
+
+    def search_fts(self, query: str, top_k: int = 10) -> List[FakeFtsResult]:
+        """Fake FTS5 search — return results with keyword match heuristic."""
+        results: List[FakeFtsResult] = []
+        query_lower = query.lower()
+        for r in self._search_results:
+            chunk_text = (r.metadata or {}).get("chunk_text", "")
+            if query_lower in chunk_text.lower():
+                results.append(FakeFtsResult(rowid=int(r.id), bm25_score=1.0))
+        return results[:top_k]
+
+    def fts_count(self) -> int:
+        """Return count of FTS-indexed items."""
+        return len(self._search_results)
 
 
 @pytest.fixture
@@ -79,9 +118,13 @@ def make_search_result(
     memory_type: str = "semantic",
     tags: Optional[list[str]] = None,
 ) -> VectorSearchResult:
-    """Helper to create a VectorSearchResult with metadata."""
+    """Helper to create a VectorSearchResult with metadata.
+
+    Uses auto-incrementing integer IDs (as strings) to match real store behaviour.
+    """
+    result_id = str(next(_id_counter))
     return VectorSearchResult(
-        id=str(uuid4()),
+        id=result_id,
         distance=distance,
         metadata={
             "file_path": file_path,

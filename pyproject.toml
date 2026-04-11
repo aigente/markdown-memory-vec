@@ -35,6 +35,7 @@ classifiers = [
 ]
 dependencies = [
     "PyYAML>=6.0",
+    "rjieba>=0.1.11",
 ]
 
 [project.optional-dependencies]

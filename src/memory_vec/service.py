@@ -239,32 +239,58 @@ class MemoryVectorService:
         top_k: int = 10,
         memory_type: Optional[str] = None,
         min_score: float = 0.0,
+        mode: Optional[str] = None,
     ) -> list[dict[str, object]]:
         """Search memories using hybrid retrieval.
 
+        Parameters
+        ----------
+        query:
+            Natural language search query.
+        top_k:
+            Maximum number of results.
+        memory_type:
+            Optional filter (e.g. ``"semantic"``, ``"episodic"``).
+        min_score:
+            Minimum hybrid score threshold.
+        mode:
+            Search mode: ``"hybrid"`` (default), ``"vector_only"``, or
+            ``"fts_only"``.  ``None`` maps to ``"hybrid"``.
+
         Returns a list of dicts with keys: file_path, chunk_text,
-        hybrid_score, semantic_score, importance, temporal_decay, etc.
+        hybrid_score, semantic_score, fts_score, importance, temporal_decay, etc.
         """
         if not self._ensure_initialized():
             return []
 
-        from .search import HybridSearchService
+        from .search import HybridSearchService, SearchMode
 
         search_svc: HybridSearchService = self._search_service  # type: ignore[assignment]
+
+        # Resolve mode
+        search_mode = SearchMode.HYBRID
+        if mode:
+            try:
+                search_mode = SearchMode(mode)
+            except ValueError:
+                logger.warning("Unknown search mode %r, defaulting to hybrid", mode)
 
         results = search_svc.search(
             query=query,
             top_k=top_k,
             memory_type=memory_type,
             min_score=min_score,
+            mode=search_mode,
         )
         return [
             {
                 "file_path": r.file_path,
                 "chunk_text": r.chunk_text,
                 "chunk_index": r.chunk_index,
+                "score": round(r.hybrid_score, 4),
                 "hybrid_score": round(r.hybrid_score, 4),
                 "semantic_score": round(r.semantic_score, 4),
+                "fts_score": round(r.fts_score, 4),
                 "importance": r.importance,
                 "temporal_decay": round(r.temporal_decay, 4),
                 "memory_type": r.memory_type,
@@ -287,6 +313,7 @@ class MemoryVectorService:
         store: SqliteVecStore = self._store  # type: ignore[assignment]
 
         total_chunks = store.count()
+        fts_chunks = store.fts_count()
 
         # Count indexed files
         rows = store.connection.execute("SELECT COUNT(DISTINCT file_path) FROM memory_vec_meta").fetchone()
@@ -303,6 +330,7 @@ class MemoryVectorService:
             "db_path": str(self._db_path),
             "db_size_kb": round(db_size_bytes / 1024, 1),
             "total_chunks": total_chunks,
+            "fts_chunks": fts_chunks,
             "indexed_files": total_files,
             "total_md_files": len(md_files),
             "model": self._model_name,
