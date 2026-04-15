@@ -55,10 +55,12 @@ class MemoryVectorService:
         memory_dir: str | Path,
         db_name: str = _DEFAULT_DB_NAME,
         model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        file_extensions: Optional[list[str]] = None,
     ) -> None:
         self._memory_root = Path(memory_dir)
         self._db_path = self._memory_root / db_name
         self._model_name = model_name
+        self._file_extensions = file_extensions  # None = .md only (backward compat)
 
         # Lazy-initialized components
         self._store: Optional[object] = None
@@ -146,7 +148,7 @@ class MemoryVectorService:
     # =========================================================================
 
     def rebuild_index(self) -> int:
-        """Drop and rebuild the entire vector index from all .md files.
+        """Drop and rebuild the entire vector index from all indexed files.
 
         Returns the total number of chunks indexed.
 
@@ -161,7 +163,7 @@ class MemoryVectorService:
 
         indexer: MemoryIndexer = self._indexer  # type: ignore[assignment]
 
-        total = indexer.reindex_all(self._memory_root)
+        total = indexer.reindex_all(self._memory_root, file_extensions=self._file_extensions)
         logger.info("Full rebuild complete: %d chunks indexed", total)
         return total
 
@@ -199,9 +201,10 @@ class MemoryVectorService:
                 )
 
         total = 0
-        # Index all .md files under the memory root (includes personal/)
-        for md_file in sorted(self._memory_root.rglob("*.md")):
-            total += indexer.index_file(md_file)
+        extensions = self._file_extensions or [".md"]
+        for f in sorted(self._memory_root.rglob("*")):
+            if f.is_file() and f.suffix.lower() in extensions:
+                total += indexer.index_file(f)
 
         if total:
             logger.info("Incremental index: %d chunks updated", total)
@@ -300,6 +303,26 @@ class MemoryVectorService:
         ]
 
     # =========================================================================
+    # File listing
+    # =========================================================================
+
+    def list_files(self) -> list[str]:
+        """Return relative paths of all indexable files under the memory root.
+
+        The returned paths are relative to :attr:`memory_root`.
+        """
+        extensions = self._file_extensions or [".md"]
+        result: list[str] = []
+        for f in sorted(self._memory_root.rglob("*")):
+            if not f.is_file():
+                continue
+            if f.name in ("vector_index.db", "vector_index.db-journal", "vector_index.db-wal"):
+                continue
+            if f.suffix.lower() in extensions:
+                result.append(str(f.relative_to(self._memory_root)))
+        return result
+
+    # =========================================================================
     # Statistics
     # =========================================================================
 
@@ -322,8 +345,9 @@ class MemoryVectorService:
         # DB file size
         db_size_bytes = self._db_path.stat().st_size if self._db_path.exists() else 0
 
-        # Count .md files in memory directory
-        md_files = list(self._memory_root.rglob("*.md"))
+        # Count target files in memory directory
+        extensions = self._file_extensions or [".md"]
+        target_files = [f for f in self._memory_root.rglob("*") if f.is_file() and f.suffix.lower() in extensions]
 
         return {
             "available": True,
@@ -332,7 +356,8 @@ class MemoryVectorService:
             "total_chunks": total_chunks,
             "fts_chunks": fts_chunks,
             "indexed_files": total_files,
-            "total_md_files": len(md_files),
+            "total_md_files": len(target_files),
+            "file_extensions": extensions,
             "model": self._model_name,
         }
 

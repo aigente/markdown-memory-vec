@@ -234,8 +234,21 @@ class MemoryIndexer:
             logger.info("Indexed %s: %d chunks embedded (%d total)", path.name, new_or_updated, len(chunks))
         return new_or_updated
 
-    def index_directory(self, dir_path: str | Path) -> int:
-        """Recursively index all ``.md`` files under *dir_path*.
+    def index_directory(
+        self,
+        dir_path: str | Path,
+        file_extensions: Optional[list[str]] = None,
+    ) -> int:
+        """Recursively index text files under *dir_path*.
+
+        Parameters
+        ----------
+        dir_path:
+            Directory to scan.
+        file_extensions:
+            List of file extensions (with dot) to index, e.g.
+            ``[".md", ".txt", ".py"]``.  When ``None`` (default), only
+            ``.md`` files are indexed for backward compatibility.
 
         Returns the total number of new/updated chunks.
         """
@@ -244,18 +257,58 @@ class MemoryIndexer:
             logger.warning("index_directory: %s is not a directory", root)
             return 0
 
+        if file_extensions is None:
+            file_extensions = [".md"]
+
         total = 0
-        for md_file in sorted(root.rglob("*.md")):
-            total += self.index_file(md_file)
+        for f in sorted(root.rglob("*")):
+            if f.is_file() and f.suffix.lower() in file_extensions:
+                total += self.index_file(f)
         return total
 
-    def reindex_all(self, memory_root: str | Path) -> int:
+    def index_directory_textfiles(self, dir_path: str | Path) -> int:
+        """Recursively index all readable text files under *dir_path*.
+
+        Unlike :meth:`index_directory`, this attempts to index **any**
+        file that can be read as UTF-8 text.  Binary files are silently
+        skipped.
+
+        Returns the total number of new/updated chunks.
+        """
+        root = Path(dir_path)
+        if not root.is_dir():
+            logger.warning("index_directory_textfiles: %s is not a directory", root)
+            return 0
+
+        total = 0
+        for f in sorted(root.rglob("*")):
+            if not f.is_file():
+                continue
+            # Skip known binary/index files
+            if f.name in ("vector_index.db", "vector_index.db-journal", "vector_index.db-wal"):
+                continue
+            # Try to read as text
+            try:
+                f.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, ValueError):
+                continue
+            total += self.index_file(f)
+        return total
+
+    def reindex_all(
+        self,
+        memory_root: str | Path,
+        file_extensions: Optional[list[str]] = None,
+    ) -> int:
         """Drop all existing index data and rebuild from scratch.
 
         Parameters
         ----------
         memory_root:
-            Root directory containing Markdown memory files.
+            Root directory containing memory files.
+        file_extensions:
+            Passed through to :meth:`index_directory`.  Defaults to
+            ``[".md"]`` for backward compatibility.
 
         Returns the total number of chunks indexed.
         """
@@ -263,7 +316,7 @@ class MemoryIndexer:
         # Clear everything via the store's public clear() method
         self._store.clear()
 
-        return self.index_directory(root)
+        return self.index_directory(root, file_extensions=file_extensions)
 
     def remove_file(self, file_path: str | Path) -> int:
         """Remove all indexed chunks for *file_path*.
