@@ -87,9 +87,7 @@ class TestHybridSearchServiceScoring:
         expected = 0.8 * 0.9 + 0.2 * 0.8
         assert abs(score - expected) < 1e-10
 
-    def test_both_neutral_gives_pure_relevance(
-        self, fake_embedder: FakeEmbedder, fake_vec_store: FakeVecStore
-    ) -> None:
+    def test_both_neutral_gives_pure_relevance(self, fake_embedder: FakeEmbedder, fake_vec_store: FakeVecStore) -> None:
         """Both signals neutral → score equals pure relevance."""
         svc = HybridSearchService(fake_vec_store, fake_embedder)
         score = svc.compute_hybrid_score(0.73, 0.5, 0.5)
