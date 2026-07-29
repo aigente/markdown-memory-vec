@@ -234,6 +234,20 @@ class SqliteVecStore(ISqliteVecStore):
         # FTS version tracking — triggers re-tokenization when logic changes
         conn.execute("CREATE TABLE IF NOT EXISTS _fts_meta (key TEXT PRIMARY KEY, value TEXT)")
 
+        # File state table — cheap (mtime, size) fingerprints used by
+        # ``MemoryVectorService.sync()`` to detect changed files without
+        # reading/hashing their content on every search.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_file_state (
+                file_path TEXT PRIMARY KEY,
+                mtime_ns INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                indexed_at TEXT
+            )
+            """
+        )
+
         conn.commit()
 
         # Backfill FTS5 from existing metadata if needed (one-time migration),
@@ -427,6 +441,7 @@ class SqliteVecStore(ISqliteVecStore):
         conn = self.connection
         conn.execute(f"DELETE FROM {self._table_name}")
         conn.execute("DELETE FROM memory_vec_meta")
+        conn.execute("DELETE FROM memory_file_state")
         self._fts_clear()
         conn.commit()
 
@@ -518,8 +533,11 @@ class SqliteVecStore(ISqliteVecStore):
     def delete_by_file(self, file_path: str) -> int:
         """Delete all embeddings for a given file.  Returns the number of rows deleted."""
         conn = self.connection
+        # Drop the fingerprint too — a re-added file must be re-indexed.
+        conn.execute("DELETE FROM memory_file_state WHERE file_path = ?", (file_path,))
         rows = conn.execute("SELECT id FROM memory_vec_meta WHERE file_path = ?", (file_path,)).fetchall()
         if not rows:
+            conn.commit()
             return 0
         rowids = [r[0] for r in rows]
         placeholders = ",".join("?" * len(rowids))
@@ -611,6 +629,60 @@ class SqliteVecStore(ISqliteVecStore):
             (file_path,),
         ).fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def list_indexed_files(self) -> List[str]:
+        """Return all distinct ``file_path`` values currently in the index."""
+        rows = self.connection.execute("SELECT DISTINCT file_path FROM memory_vec_meta").fetchall()
+        return [r[0] for r in rows]
+
+    # -- file state (mtime/size fingerprints) --------------------------------
+
+    def get_file_states(self) -> Dict[str, tuple[int, int]]:
+        """Return ``{file_path: (mtime_ns, size)}`` for all tracked files."""
+        rows = self.connection.execute("SELECT file_path, mtime_ns, size FROM memory_file_state").fetchall()
+        return {r[0]: (int(r[1]), int(r[2])) for r in rows}
+
+    def set_file_state(self, file_path: str, mtime_ns: int, size: int) -> None:
+        """Record (or update) the on-disk fingerprint for *file_path*."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self.connection
+        conn.execute(
+            """
+            INSERT INTO memory_file_state (file_path, mtime_ns, size, indexed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                mtime_ns = excluded.mtime_ns,
+                size = excluded.size,
+                indexed_at = excluded.indexed_at
+            """,
+            (file_path, int(mtime_ns), int(size), now),
+        )
+        conn.commit()
+
+    def set_file_states(self, states: Dict[str, tuple[int, int]]) -> None:
+        """Batch version of :meth:`set_file_state` (single transaction)."""
+        if not states:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        conn = self.connection
+        conn.executemany(
+            """
+            INSERT INTO memory_file_state (file_path, mtime_ns, size, indexed_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(file_path) DO UPDATE SET
+                mtime_ns = excluded.mtime_ns,
+                size = excluded.size,
+                indexed_at = excluded.indexed_at
+            """,
+            [(fp, int(mtime_ns), int(size), now) for fp, (mtime_ns, size) in states.items()],
+        )
+        conn.commit()
+
+    def delete_file_state(self, file_path: str) -> None:
+        """Forget the fingerprint for *file_path* (e.g. after deletion)."""
+        conn = self.connection
+        conn.execute("DELETE FROM memory_file_state WHERE file_path = ?", (file_path,))
+        conn.commit()
 
     def record_access(self, rowid: int) -> None:
         """Bump access count and update ``last_accessed`` for a result row."""

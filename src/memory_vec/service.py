@@ -23,6 +23,7 @@ Usage from Python::
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -164,6 +165,7 @@ class MemoryVectorService:
         indexer: MemoryIndexer = self._indexer  # type: ignore[assignment]
 
         total = indexer.reindex_all(self._memory_root, file_extensions=self._file_extensions)
+        self._refresh_file_states()
         logger.info("Full rebuild complete: %d chunks indexed", total)
         return total
 
@@ -205,6 +207,7 @@ class MemoryVectorService:
         for f in sorted(self._memory_root.rglob("*")):
             if f.is_file() and f.suffix.lower() in extensions:
                 total += indexer.index_file(f)
+        self._refresh_file_states()
 
         if total:
             logger.info("Incremental index: %d chunks updated", total)
@@ -212,15 +215,155 @@ class MemoryVectorService:
             logger.info("Incremental index: all chunks up to date")
         return total
 
+    def sync(self, max_changed_files: Optional[int] = None) -> dict[str, object]:
+        """Fast freshness sync — index changed files, drop deleted ones.
+
+        Unlike :meth:`incremental_index` (which reads and hashes *every*
+        file), this compares cheap ``(mtime_ns, size)`` fingerprints stored
+        in the ``memory_file_state`` table against the filesystem, so an
+        unchanged memory directory costs only a ``rglob`` + one SQL query.
+
+        Designed to be called at the start of every search so results never
+        come from a stale index.
+
+        Parameters
+        ----------
+        max_changed_files:
+            Safety valve for very large knowledge bases.  When more files
+            changed than this limit, only the first *max_changed_files*
+            (most recently modified) are re-indexed; the rest are left for
+            a full :meth:`incremental_index` run.  ``None`` = no limit.
+
+        Returns a summary dict::
+
+            {"indexed_files": 2, "updated_chunks": 7, "removed_files": 1, "skipped_files": 0, "elapsed_seconds": 0.31}
+        """
+        t0 = time.monotonic()
+        empty: dict[str, object] = {
+            "indexed_files": 0,
+            "updated_chunks": 0,
+            "removed_files": 0,
+            "skipped_files": 0,
+            "elapsed_seconds": 0.0,
+        }
+        if not self._ensure_initialized():
+            return empty
+
+        from .indexer import MemoryIndexer
+        from .store import SqliteVecStore
+
+        indexer: MemoryIndexer = self._indexer  # type: ignore[assignment]
+        store: SqliteVecStore = self._store  # type: ignore[assignment]
+
+        extensions = self._file_extensions or [".md"]
+
+        # ── 1. Scan disk (stat only — no file reads) ──
+        disk: dict[str, tuple[Path, int, int]] = {}
+        for f in self._memory_root.rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in extensions:
+                continue
+            if f.name.startswith("vector_index.db"):
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            disk[str(f.relative_to(self._memory_root))] = (f, st.st_mtime_ns, st.st_size)
+
+        states = store.get_file_states()
+
+        # ── 2. Detect changed / new files ──
+        changed = [(rel, meta) for rel, meta in disk.items() if states.get(rel) != (meta[1], meta[2])]
+        skipped = 0
+        if max_changed_files is not None and len(changed) > max_changed_files:
+            changed.sort(key=lambda item: item[1][1], reverse=True)  # newest mtime first
+            skipped = len(changed) - max_changed_files
+            changed = changed[:max_changed_files]
+            logger.warning(
+                "sync: %d files changed, only re-indexing the %d most recent "
+                "(run incremental_index() for a full pass)",
+                skipped + max_changed_files,
+                max_changed_files,
+            )
+
+        updated_chunks = 0
+        for rel, (path, mtime_ns, size) in changed:
+            try:
+                updated_chunks += indexer.index_file(path)
+                store.set_file_state(rel, mtime_ns, size)
+            except Exception:
+                logger.warning("sync: failed to index %s", rel, exc_info=True)
+
+        # ── 3. Drop files that no longer exist on disk ──
+        # (also purges legacy absolute-path entries, which never match a
+        # relative disk key)
+        known = set(states) | set(store.list_indexed_files())
+        removed = 0
+        for rel in known - set(disk):
+            store.delete_by_file(rel)
+            removed += 1
+
+        elapsed = round(time.monotonic() - t0, 3)
+        if updated_chunks or removed:
+            logger.info(
+                "sync: %d files re-indexed (%d chunks), %d removed, %.2fs",
+                len(changed),
+                updated_chunks,
+                removed,
+                elapsed,
+            )
+        return {
+            "indexed_files": len(changed),
+            "updated_chunks": updated_chunks,
+            "removed_files": removed,
+            "skipped_files": skipped,
+            "elapsed_seconds": elapsed,
+        }
+
+    def _refresh_file_states(self) -> None:
+        """Record current ``(mtime_ns, size)`` fingerprints for all files.
+
+        Called after a full/incremental index pass so that a subsequent
+        :meth:`sync` sees an up-to-date baseline and does no extra work.
+        """
+        from .store import SqliteVecStore
+
+        store: SqliteVecStore = self._store  # type: ignore[assignment]
+        extensions = self._file_extensions or [".md"]
+        states: dict[str, tuple[int, int]] = {}
+        for f in self._memory_root.rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in extensions:
+                continue
+            if f.name.startswith("vector_index.db"):
+                continue
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            states[str(f.relative_to(self._memory_root))] = (st.st_mtime_ns, st.st_size)
+        store.set_file_states(states)
+
     def index_file(self, file_path: str | Path) -> int:
         """Index a single file. Returns the number of new/updated chunks."""
         if not self._ensure_initialized():
             return 0
 
         from .indexer import MemoryIndexer
+        from .store import SqliteVecStore
 
         indexer: MemoryIndexer = self._indexer  # type: ignore[assignment]
-        return indexer.index_file(file_path)
+        store: SqliteVecStore = self._store  # type: ignore[assignment]
+        count = indexer.index_file(file_path)
+
+        # Keep the fingerprint in sync so a later sync() skips this file.
+        path = Path(file_path).resolve()
+        try:
+            if path.is_file() and path.is_relative_to(self._memory_root.resolve()):
+                st = path.stat()
+                store.set_file_state(str(path.relative_to(self._memory_root.resolve())), st.st_mtime_ns, st.st_size)
+        except OSError:
+            pass
+        return count
 
     def remove_file(self, file_path: str | Path) -> int:
         """Remove a file from the index. Returns rows deleted."""
