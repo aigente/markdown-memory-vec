@@ -46,6 +46,7 @@ from .embedder import (
     is_any_backend_available,
     is_onnx_available,
     is_sentence_transformers_available,
+    unload_models,
 )
 from .indexer import MemoryIndexer, chunk_text, parse_frontmatter
 from .interfaces import IEmbedder, ISqliteVecStore, VectorRecord, VectorSearchResult
@@ -72,6 +73,7 @@ __all__ = [
     "is_onnx_available",
     "is_sentence_transformers_available",
     "is_any_backend_available",
+    "unload_models",
     # Indexer
     "MemoryIndexer",
     "chunk_text",

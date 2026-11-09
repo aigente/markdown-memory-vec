@@ -14,14 +14,28 @@ or import the specific class they need.
 
 The heavy ML imports are deferred until the first call so that importing this
 module is always cheap.
+
+Loaded models are held in a process-wide cache and **unloaded after an idle
+period** (``MEMORY_VEC_IDLE_UNLOAD_SECONDS``, default 900; ``0`` keeps them
+forever).  The default fp32 model costs ~1 GB of RSS once loaded, so a
+long-running host should not pay for it while nobody is searching.
+
+Note for macOS hosts: the system allocator keeps freed large blocks in a
+per-process cache, so unloading only shrinks the footprint if the process was
+started with ``MallocLargeCache=0`` in its environment.
 """
 
 from __future__ import annotations
 
+import ctypes
+import gc
 import logging
 import os
+import sys
+import threading
+import time
 from pathlib import Path
-from typing import Any, List
+from typing import Any, Callable, List
 
 from .interfaces import IEmbedder
 
@@ -33,8 +47,139 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL_NAME = "paraphrase-multilingual-MiniLM-L12-v2"
 _DEFAULT_DIMENSION = 384
 
+# Output dimension per model.  Seeded with models whose dimension is known
+# up-front so asking for ``dimension`` (e.g. to open the vector store) does not
+# force a ~1 GB model load; filled in for other models after their first load.
+_KNOWN_DIMENSIONS: dict[str, int] = {_DEFAULT_MODEL_NAME: _DEFAULT_DIMENSION}
+
 # ONNX model cache directory
 _ONNX_CACHE_DIR = Path.home() / ".cache" / "aigente" / "models" / "onnx"
+
+# Idle unload
+_IDLE_UNLOAD_ENV = "MEMORY_VEC_IDLE_UNLOAD_SECONDS"
+_DEFAULT_IDLE_UNLOAD_SECONDS = 900.0
+_MAX_REAP_INTERVAL_SECONDS = 60.0
+
+
+def _idle_unload_seconds() -> float:
+    """Return the idle period after which a loaded model is dropped (0 = never)."""
+    raw = os.environ.get(_IDLE_UNLOAD_ENV)
+    if raw is None or not raw.strip():
+        return _DEFAULT_IDLE_UNLOAD_SECONDS
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r, using default %.0fs", _IDLE_UNLOAD_ENV, raw, _DEFAULT_IDLE_UNLOAD_SECONDS)
+        return _DEFAULT_IDLE_UNLOAD_SECONDS
+
+
+def _release_freed_memory() -> None:
+    """Collect garbage and ask the C allocator to return freed pages to the OS.
+
+    Best effort: glibc keeps freed heap memory in-process unless trimmed.
+    (On macOS the equivalent knob is the ``MallocLargeCache=0`` env var, which
+    must be set when the process starts.)
+    """
+    gc.collect()
+    if sys.platform.startswith("linux"):
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception:  # non-glibc (musl) or no libc — nothing to do
+            pass
+
+
+class _IdleModelCache:
+    """Thread-safe ``model_name -> loaded model`` cache with idle eviction.
+
+    :meth:`get` loads on first use (concurrent first calls load only once) and
+    stamps the entry as recently used.  While the cache is non-empty a daemon
+    reaper thread evicts entries untouched for the idle period; the thread
+    exits as soon as the cache is empty, so an idle process runs no extra
+    thread.  Callers that are mid-inference keep their own reference, so an
+    eviction never pulls a model out from under a running call.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._entries: dict[str, Any] = {}
+        self._last_used: dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._reaper: threading.Thread | None = None
+
+    def __contains__(self, key: object) -> bool:
+        with self._lock:
+            return key in self._entries
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def get(self, key: str, loader: Callable[[], Any]) -> Any:
+        """Return the cached model for *key*, loading it with *loader* if absent."""
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                # Load under the lock: a second caller waits instead of loading
+                # a duplicate copy (~1 GB) in parallel.
+                entry = loader()
+                self._entries[key] = entry
+                self._start_reaper_locked()
+            self._last_used[key] = time.monotonic()
+            return entry
+
+    def evict_idle(self, idle_seconds: float, now: float | None = None) -> int:
+        """Drop entries unused for at least *idle_seconds*. Returns how many were dropped."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            stale = [k for k, t in self._last_used.items() if now - t >= idle_seconds]
+            evicted = [self._pop_locked(k) for k in stale]
+        if evicted:
+            del evicted
+            _release_freed_memory()
+            logger.info("Unloaded idle %s embedding model(s): %s", self._name, ", ".join(stale))
+        return len(stale)
+
+    def clear(self) -> int:
+        """Drop every entry now. Returns how many were dropped."""
+        return self.evict_idle(0.0, now=float("inf"))
+
+    def _pop_locked(self, key: str) -> Any:
+        self._last_used.pop(key, None)
+        return self._entries.pop(key, None)
+
+    def _start_reaper_locked(self) -> None:
+        idle_seconds = _idle_unload_seconds()
+        if idle_seconds <= 0 or self._reaper is not None:
+            return
+        self._reaper = threading.Thread(
+            target=self._reap_loop,
+            args=(idle_seconds,),
+            name=f"memory-vec-{self._name}-unloader",
+            daemon=True,
+        )
+        self._reaper.start()
+
+    def _reap_loop(self, idle_seconds: float) -> None:
+        interval = min(_MAX_REAP_INTERVAL_SECONDS, idle_seconds / 4)
+        while True:
+            time.sleep(interval)
+            try:
+                self.evict_idle(idle_seconds)
+            except Exception:
+                logger.warning("Idle model unload failed", exc_info=True)
+            with self._lock:
+                if not self._entries:
+                    self._reaper = None
+                    return
+
+
+def unload_models() -> int:
+    """Unload every cached embedding model now. Returns how many were dropped.
+
+    Models reload transparently on the next ``embed``/``embed_batch`` call.
+    """
+    return OnnxEmbedder.unload_all() + SentenceTransformerEmbedder.unload_all()
+
 
 # ---------------------------------------------------------------------------
 # Availability checks (lazy — avoid heavy imports at module level)
@@ -262,8 +407,8 @@ class OnnxEmbedder(IEmbedder):
     Lightweight alternative (~55 MB) to sentence-transformers (~1.5 GB).
     Produces embeddings identical to the original model (cosine sim > 0.99).
 
-    The ONNX session and tokenizer are loaded lazily on first use and cached
-    at class level.
+    The ONNX session and tokenizer are loaded lazily on first use, cached at
+    class level, and unloaded again after an idle period (see module docs).
 
     Parameters
     ----------
@@ -276,7 +421,7 @@ class OnnxEmbedder(IEmbedder):
     """
 
     # Class-level cache: model_name -> (session, tokenizer)
-    _cache: dict[str, tuple[Any, Any]] = {}
+    _cache = _IdleModelCache("onnx")
 
     def __init__(
         self,
@@ -289,7 +434,11 @@ class OnnxEmbedder(IEmbedder):
             )
         self._model_name = model_name
         self._model_dir = Path(model_dir) if model_dir else None
-        self._dimension_override: int | None = None
+
+    @classmethod
+    def unload_all(cls) -> int:
+        """Unload every cached ONNX model now. Returns how many were dropped."""
+        return cls._cache.clear()
 
     def _resolve_dir(self) -> Path:
         """Resolve the model directory, raising if not found."""
@@ -305,59 +454,60 @@ class OnnxEmbedder(IEmbedder):
 
     @property
     def _session_and_tokenizer(self) -> tuple[Any, Any]:
-        """Return cached (InferenceSession, Tokenizer) tuple."""
-        if self._model_name not in self._cache:
-            import onnxruntime as ort  # type: ignore[import-untyped]
-            from tokenizers import Tokenizer  # type: ignore[import-untyped]
+        """Return cached (InferenceSession, Tokenizer) tuple, loading it if needed."""
+        result: tuple[Any, Any] = self._cache.get(self._model_name, self._load)
+        return result
 
-            model_dir = self._resolve_dir()
+    def _load(self) -> tuple[Any, Any]:
+        import onnxruntime as ort  # type: ignore[import-untyped]
+        from tokenizers import Tokenizer  # type: ignore[import-untyped]
 
-            # Find model.onnx
-            model_path = model_dir / "model.onnx"
-            if not model_path.exists():
-                raise FileNotFoundError(f"model.onnx not found in {model_dir}")
+        model_dir = self._resolve_dir()
 
-            # Find tokenizer.json — may be in parent dir (HF onnx/ subfolder case)
-            tokenizer_path = model_dir / "tokenizer.json"
-            if not tokenizer_path.exists():
-                tokenizer_path = model_dir.parent / "tokenizer.json"
-            if not tokenizer_path.exists():
-                raise FileNotFoundError(f"tokenizer.json not found in {model_dir} or {model_dir.parent}")
+        # Find model.onnx
+        model_path = model_dir / "model.onnx"
+        if not model_path.exists():
+            raise FileNotFoundError(f"model.onnx not found in {model_dir}")
 
-            logger.info("Loading ONNX model: %s", model_path)
-            logger.info("Loading tokenizer: %s", tokenizer_path)
+        # Find tokenizer.json — may be in parent dir (HF onnx/ subfolder case)
+        tokenizer_path = model_dir / "tokenizer.json"
+        if not tokenizer_path.exists():
+            tokenizer_path = model_dir.parent / "tokenizer.json"
+        if not tokenizer_path.exists():
+            raise FileNotFoundError(f"tokenizer.json not found in {model_dir} or {model_dir.parent}")
 
-            # Configure ONNX Runtime session
-            sess_options = ort.SessionOptions()
-            sess_options.inter_op_num_threads = 1
-            sess_options.intra_op_num_threads = 2
-            sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        logger.info("Loading ONNX model: %s", model_path)
+        logger.info("Loading tokenizer: %s", tokenizer_path)
 
-            # Use CPU provider — Apple Silicon's Accelerate/NEON is efficient enough
-            # for a 384-dim embedding model (~4ms per query).
-            # Note: CoreMLExecutionProvider doesn't support dynamic-shape transformer
-            # models (session.run() crashes on batch>1 due to unbounded dimensions).
-            session = ort.InferenceSession(
-                str(model_path),
-                sess_options=sess_options,
-                providers=["CPUExecutionProvider"],
-            )
-            logger.info("ONNX session using CPU provider")
+        # Configure ONNX Runtime session
+        sess_options = ort.SessionOptions()
+        sess_options.inter_op_num_threads = 1
+        sess_options.intra_op_num_threads = 2
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
-            tokenizer = Tokenizer.from_file(str(tokenizer_path))
-            # Set max length consistent with the model (128 tokens for MiniLM)
-            tokenizer.enable_truncation(max_length=128)
-            tokenizer.enable_padding(length=128)
+        # Use CPU provider — Apple Silicon's Accelerate/NEON is efficient enough
+        # for a 384-dim embedding model (~4ms per query).
+        # Note: CoreMLExecutionProvider doesn't support dynamic-shape transformer
+        # models (session.run() crashes on batch>1 due to unbounded dimensions).
+        session = ort.InferenceSession(
+            str(model_path),
+            sess_options=sess_options,
+            providers=["CPUExecutionProvider"],
+        )
+        logger.info("ONNX session using CPU provider")
 
-            self._cache[self._model_name] = (session, tokenizer)
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        # Set max length consistent with the model (128 tokens for MiniLM)
+        tokenizer.enable_truncation(max_length=128)
+        tokenizer.enable_padding(length=128)
 
-            # Infer dimension from model output shape
-            outputs = session.get_outputs()
-            # token_embeddings output shape: [batch, seq_len, dim]
-            if outputs and len(outputs[0].shape) == 3:
-                self._dimension_override = outputs[0].shape[2]
+        # Infer dimension from model output shape
+        outputs = session.get_outputs()
+        # token_embeddings output shape: [batch, seq_len, dim]
+        if outputs and len(outputs[0].shape) == 3 and isinstance(outputs[0].shape[2], int):
+            _KNOWN_DIMENSIONS[self._model_name] = outputs[0].shape[2]
 
-        return self._cache[self._model_name]
+        return session, tokenizer
 
     def _encode(self, texts: List[str]) -> Any:
         """Tokenize, run ONNX inference, mean-pool, and L2-normalize."""
@@ -407,11 +557,10 @@ class OnnxEmbedder(IEmbedder):
 
     @property
     def dimension(self) -> int:
-        """Return the vector dimension (triggers model load if unknown)."""
-        if self._dimension_override is not None:
-            return self._dimension_override
-        _ = self._session_and_tokenizer
-        return self._dimension_override or _DEFAULT_DIMENSION
+        """Return the vector dimension (loads the model only if the dimension is unknown)."""
+        if self._model_name not in _KNOWN_DIMENSIONS:
+            _ = self._session_and_tokenizer
+        return _KNOWN_DIMENSIONS.get(self._model_name, _DEFAULT_DIMENSION)
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +572,8 @@ class SentenceTransformerEmbedder(IEmbedder):
     The underlying ``SentenceTransformer`` model is loaded lazily on the first
     call to :meth:`embed` or :meth:`embed_batch`, and is then cached as a
     class-level variable so it is shared across all instances using the same
-    model name.
+    model name.  Like :class:`OnnxEmbedder`, it is unloaded after an idle
+    period (see module docs).
 
     Parameters
     ----------
@@ -433,7 +583,7 @@ class SentenceTransformerEmbedder(IEmbedder):
     """
 
     # Class-level cache: model_name -> SentenceTransformer instance
-    _model_cache: dict[str, Any] = {}
+    _model_cache = _IdleModelCache("sentence-transformers")
 
     def __init__(self, model_name: str = _DEFAULT_MODEL_NAME) -> None:
         if not is_sentence_transformers_available():
@@ -441,24 +591,29 @@ class SentenceTransformerEmbedder(IEmbedder):
                 "sentence-transformers is not installed. " "Install it with: pip install 'markdown-memory-vec[vector]'"
             )
         self._model_name = model_name
-        self._dimension_override: int | None = None
+
+    @classmethod
+    def unload_all(cls) -> int:
+        """Unload every cached sentence-transformers model now. Returns how many were dropped."""
+        return cls._model_cache.clear()
 
     # -- lazy model loading --------------------------------------------------
 
     @property
     def _model(self) -> Any:
-        """Return the cached ``SentenceTransformer`` instance."""
-        if self._model_name not in self._model_cache:
-            from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
+        """Return the cached ``SentenceTransformer`` instance, loading it if needed."""
+        return self._model_cache.get(self._model_name, self._load)
 
-            model_path = _ensure_hf_env(self._model_name)
-            logger.info("Loading sentence-transformer model: %s", model_path)
-            model = SentenceTransformer(model_path)
-            self._model_cache[self._model_name] = model
-            # Infer dimension from the model
-            dim: int = model.get_sentence_embedding_dimension()  # type: ignore[assignment]
-            self._dimension_override = dim
-        return self._model_cache[self._model_name]
+    def _load(self) -> Any:
+        from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
+
+        model_path = _ensure_hf_env(self._model_name)
+        logger.info("Loading sentence-transformer model: %s", model_path)
+        model = SentenceTransformer(model_path)
+        dim = model.get_sentence_embedding_dimension()
+        if isinstance(dim, int):
+            _KNOWN_DIMENSIONS[self._model_name] = dim
+        return model
 
     # -- IEmbedder interface implementation ----------------------------------
 
@@ -476,12 +631,10 @@ class SentenceTransformerEmbedder(IEmbedder):
 
     @property
     def dimension(self) -> int:
-        """Return the vector dimension (triggers model load if unknown)."""
-        if self._dimension_override is not None:
-            return self._dimension_override
-        # Trigger model load to discover dimension
-        _ = self._model
-        return self._dimension_override or _DEFAULT_DIMENSION
+        """Return the vector dimension (loads the model only if the dimension is unknown)."""
+        if self._model_name not in _KNOWN_DIMENSIONS:
+            _ = self._model
+        return _KNOWN_DIMENSIONS.get(self._model_name, _DEFAULT_DIMENSION)
 
 
 # ---------------------------------------------------------------------------
